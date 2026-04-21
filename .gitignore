@@ -28,3 +28,4 @@ Thumbs.db
 # Docker
 postgres-data/
 redis-data/
+plan-output.txt
