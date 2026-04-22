@@ -29,3 +29,6 @@ Thumbs.db
 postgres-data/
 redis-data/
 plan-output.txt
+
+researcher-output*.json
+researcher-output*.txt
