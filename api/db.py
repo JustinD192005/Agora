@@ -20,6 +20,8 @@ class Run(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_question: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_researchers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    synthesizer_enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

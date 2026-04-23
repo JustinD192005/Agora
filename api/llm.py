@@ -49,11 +49,9 @@ def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, GeminiClientError):
         msg = str(exc)
         return "429" in msg or "RESOURCE_EXHAUSTED" in msg
-    # OpenAI / Groq errors and network errors — retry by default
     msg = str(exc).lower()
     if "429" in msg or "rate" in msg or "timeout" in msg or "connection" in msg:
         return True
-    # Non-retryable by default for unknown errors to fail fast
     return False
 
 
@@ -114,12 +112,7 @@ async def call_structured_groq(
     temperature: float = 0.2,
     max_tokens: int = 2048,
 ) -> T:
-    """Call Groq with a Pydantic response_model. Used by the researcher loop.
-
-    Note: this takes full messages (not a single prompt) because the researcher
-    needs to maintain a multi-turn conversation — user question, assistant
-    tool call, tool result, and so on.
-    """
+    """Call Groq with a Pydantic response_model. Used by the researcher loop."""
     log.info("llm.groq.start", model=model, response_model=response_model.__name__)
 
     try:
@@ -148,5 +141,4 @@ GROQ_LLAMA = "llama-3.3-70b-versatile"
 
 
 # ---------- Backward-compat alias ----------
-# worker/planner.py still imports `call_structured`. Keep the old name working.
 call_structured = call_structured_gemini

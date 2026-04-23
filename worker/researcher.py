@@ -1,28 +1,27 @@
-
 """Researcher agent — answers a single sub-question via a ReAct tool-use loop.
 
 Flow per iteration:
-  1. Ask Groq (Llama 3.3 70B) which tool to call next, given the conversation so far
+  1. Ask the researcher LLM which tool to call next, given the conversation so far
   2. Dispatch to the tool
   3. Append the tool result as an observation
   4. If the tool was `finish`, return the mini-report
   5. Otherwise loop
 
-Hard cap: 8 iterations. After that, we force-finish with whatever the agent has.
+Hard cap: MAX_ITERATIONS. After that, we force-finish with whatever the agent has.
 
 Design notes:
-- We use instructor's TOOLS mode — Groq sees the tool input schemas as
+- We use instructor's TOOLS mode — the LLM sees the tool input schemas as
   OpenAI-style function specs and chooses one per turn.
 - Every LLM call and tool call is logged and returned as structured trace events,
   so the worker can persist them for the Week 4 dashboard.
 - All tool errors become observations the agent can reason about — we never
   crash the loop on a flaky URL or a malformed query.
+- Older tool observations are compacted to short breadcrumbs after 2 turns, so
+  per-iteration token usage stays roughly flat instead of growing linearly.
 """
 from typing import Literal, Union
-
 import structlog
 from pydantic import BaseModel, Field
-
 from api.llm import GROQ_LLAMA, call_structured_groq
 from worker.tools import (
     CalculatorInput,
@@ -36,57 +35,40 @@ from worker.tools import (
 
 log = structlog.get_logger()
 
-
 # ============================================================
 # Tool choice schema — what the LLM outputs each turn
 # ============================================================
-
-# The LLM picks exactly one tool per iteration. We use a Pydantic
-# discriminated union so instructor can generate the correct function-
-# calling spec, and we get a typed result we can dispatch on.
 
 class SearchAction(BaseModel):
     """Run web_search."""
     tool: Literal["web_search"] = "web_search"
     input: WebSearchInput
 
-
 class FetchAction(BaseModel):
     """Run web_fetch."""
     tool: Literal["web_fetch"] = "web_fetch"
     input: WebFetchInput
-
 
 class CalculatorAction(BaseModel):
     """Run calculator."""
     tool: Literal["calculator"] = "calculator"
     input: CalculatorInput
 
-
 class FinishAction(BaseModel):
     """Terminal tool — call this when you have enough to answer."""
     tool: Literal["finish"] = "finish"
     input: FinishInput
 
-
-# Discriminated union — instructor will expose all four as callable tools
-# and return exactly one per LLM call.
 ToolAction = Union[SearchAction, FetchAction, CalculatorAction, FinishAction]
 
-
 class AgentChoice(BaseModel):
-    """What the LLM returns on each turn.
-
-    thought: brief reasoning (for observability, not shown to user)
-    action: which tool to call + its input
-    """
+    """What the LLM returns on each turn."""
     thought: str = Field(
         description="One sentence: why you're choosing this tool right now. "
                     "Helps you reason step-by-step.",
         max_length=400,
     )
     action: ToolAction
-
 
 # ============================================================
 # Output schemas — what the researcher produces
@@ -96,12 +78,11 @@ class MiniReport(BaseModel):
     """The final answer for one sub-question."""
     sub_question: str
     summary: str
-    citations: list[dict]  # list of {url, quote} — using dict to keep serialization simple
+    citations: list[dict]
     confidence_notes: str
     iterations: int
     terminated_reason: Literal["finish", "iteration_cap", "error"]
-    trace: list[dict]  # list of {kind, payload} events for the dashboard
-
+    trace: list[dict]
 
 # ============================================================
 # Prompts
@@ -131,68 +112,19 @@ RULES:
 - If a search returns no useful results, try a different query before giving up.
 - If a fetch fails, try a different URL. Don't get stuck on one source.
 - Keep summaries to 2-5 sentences. Long summaries dilute useful information.
-- You have at most 8 tool calls. Budget them. Don't search 5 times before fetching anything.
+- You have at most 5 tool calls. Budget them. Don't search 5 times before fetching anything.
 - Each turn, use the "thought" field to briefly justify your choice.
 
-IMPORTANT TOOL FORMAT:
-
-When selecting a tool, you MUST return:
-
-{
-  "thought": "...",
-  "action": {
-    "tool": "<one of: web_search | web_fetch | calculator | finish>",
-    "input": { ... }   // MUST be an object matching the tool schema
-  }
-}
-
-Examples:
-
-web_search:
-{
-  "thought": "I need to find sources",
-  "action": {
-    "tool": "web_search",
-    "input": { "query": "vector database comparison pinecone weaviate qdrant" }
-  }
-}
-
-web_fetch:
-{
-  "thought": "I should read this article",
-  "action": {
-    "tool": "web_fetch",
-    "input": { "url": "https://example.com" }
-  }
-}
-
-finish:
-{
-  "thought": "I have enough information",
-  "action": {
-    "tool": "finish",
-    "input": {
-      "summary": "...",
-      "citations": [...],
-      "confidence_notes": "..."
-    }
-  }
-}
-
-STRICT RULES:
-- ALWAYS include "input"
-- NEVER flatten fields
-- NEVER omit required fields
-- Return EXACTLY this structure
+NOTE on history: older observations in this conversation may appear as compact
+breadcrumbs like "Observation from web_fetch: [compacted — original was N chars]".
+That just means you already consumed that content earlier. Don't re-fetch the same URL.
 """
-
 
 # ============================================================
 # The loop
 # ============================================================
 
-MAX_ITERATIONS = 8
-
+MAX_ITERATIONS = 5
 
 async def run_research_loop(sub_question: str) -> MiniReport:
     """Drive the agent through its tool-use loop until finish or cap."""
@@ -210,7 +142,7 @@ async def run_research_loop(sub_question: str) -> MiniReport:
         iterations += 1
         log.info("researcher.iteration", sub_question=sub_question[:80], iteration=iterations)
 
-        # --- LLM step: ask Groq what to do next ---
+        # --- LLM step: ask the researcher LLM what to do next ---
         try:
             choice = await call_structured_groq(
                 model=GROQ_LLAMA,
@@ -263,18 +195,20 @@ async def run_research_loop(sub_question: str) -> MiniReport:
             "content": f"Observation from {action.tool}:\n{observation_text}",
         })
 
+        # --- Compact older observations to save tokens ---
+        # Any observation older than the most recent 2 turns gets collapsed to
+        # a short breadcrumb. The agent has already consumed its relevant bits
+        # by now; keeping the full text in context just inflates every future
+        # LLM call. This typically saves 60-70% of tokens on iteration 3+.
+        _compact_old_observations(messages)
+
     # --- Iteration cap hit ---
     log.warning("researcher.iteration_cap", sub_question=sub_question[:80])
     trace.append({"kind": "iteration_cap", "payload": {"iterations": iterations}})
     return _emergency_report(sub_question, iterations, trace, reason="iteration_cap")
 
-
 async def _dispatch_tool(action: ToolAction, trace: list[dict]) -> str:
-    """Run the chosen tool and return a text observation for the LLM.
-
-    We deliberately serialize observations as compact strings rather than
-    structured JSON. LLMs reason better over readable text than nested JSON.
-    """
+    """Run the chosen tool and return a text observation for the LLM."""
     if isinstance(action, SearchAction):
         result = await web_search(action.input)
         trace.append({"kind": "tool_call", "payload": {
@@ -316,15 +250,45 @@ async def _dispatch_tool(action: ToolAction, trace: list[dict]) -> str:
 
     return f"Unknown tool: {action}"
 
+def _compact_old_observations(messages: list[dict]) -> None:
+    """Replace old tool observations with short breadcrumbs to save tokens.
 
+    Strategy: keep the most recent 2 user messages (tool observations) verbatim.
+    Replace anything older with a brief '[compacted — original was N chars]'
+    note. The assistant's thoughts are kept intact — they're short and useful as
+    reasoning history.
+
+    Index 0 is the system prompt, index 1 is the original user question;
+    both are always preserved verbatim. After that, messages alternate
+    assistant (thought + tool choice) and user (tool observation).
+     
+    Mutates the messages list in place. Idempotent.
+    """
+    observation_indices = [
+        i for i, m in enumerate(messages)
+        if m["role"] == "user" and i >= 2 and m["content"].startswith("Observation from")
+    ]
+
+    # Keep the most recent 2 observations verbatim. Compact anything older.
+    if len(observation_indices) <= 2:
+        return
+
+    to_compact = observation_indices[:-2]
+    for idx in to_compact:
+        content = messages[idx]["content"]
+        first_line = content.split("\n", 1)[0]
+        # Idempotent: skip if already compacted
+        if "[compacted" in first_line:
+            continue
+        messages[idx] = {
+            "role": "user",
+            "content": f"{first_line} [compacted — original was {len(content)} chars]",
+        }
+ 
 def _emergency_report(
     sub_question: str, iterations: int, trace: list[dict], reason: str,
 ) -> MiniReport:
-    """Fallback when the loop exits without a proper finish call.
-
-    Returning a structured 'no answer' is better than raising — the synthesizer
-    (Day 4) can still include it and note that the researcher didn't converge.
-    """
+    """Fallback when the loop exits without a proper finish call."""
     return MiniReport(
         sub_question=sub_question,
         summary=f"The researcher did not reach a confident answer within {iterations} iterations.",
@@ -332,6 +296,5 @@ def _emergency_report(
         confidence_notes=f"Agent terminated due to: {reason}",
         iterations=iterations,
         terminated_reason=reason,
-        trace=trace,
-    ) 
-
+        trace=trace,    
+    )

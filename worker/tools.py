@@ -111,7 +111,7 @@ class WebFetchOutput(BaseModel):
 
 # Hard cap on extracted text: 50KB. Most research needs don't exceed this,
 # and longer content blows up LLM context and cost.
-MAX_CONTENT_CHARS = 15000
+MAX_CONTENT_CHARS = 8000
 
 
 async def web_fetch(input: WebFetchInput) -> WebFetchOutput:
