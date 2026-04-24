@@ -110,7 +110,7 @@ async def call_structured_groq(
     messages: list[dict],
     response_model: type[T],
     temperature: float = 0.2,
-    max_tokens: int = 2048,
+    max_tokens: int = 800,
 ) -> T:
     """Call Groq with a Pydantic response_model. Used by the researcher loop."""
     log.info("llm.groq.start", model=model, response_model=response_model.__name__)
@@ -125,7 +125,7 @@ async def call_structured_groq(
         )
     except Exception as exc:
         if not _is_retryable(exc):
-            log.error("llm.groq.non_retryable", error_type=type(exc).__name__, error=str(exc)[:200])
+            log.error("llm.groq.non_retryable", error_type=type(exc).__name__, error=str(exc)[:2000])
             raise
         log.warning("llm.groq.retryable_error", error_type=type(exc).__name__)
         raise

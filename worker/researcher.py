@@ -12,16 +12,21 @@ Hard cap: MAX_ITERATIONS. After that, we force-finish with whatever the agent ha
 Design notes:
 - We use instructor's TOOLS mode — the LLM sees the tool input schemas as
   OpenAI-style function specs and chooses one per turn.
-- Every LLM call and tool call is logged and returned as structured trace events,
-  so the worker can persist them for the Week 4 dashboard.
+- The schema uses a FLAT shape (tool + per-tool-input fields) rather than a
+  nested discriminated union, because Groq's tool validator requires flat
+  parameter shapes. The LLM picks one tool via the `tool` literal, then
+  populates the corresponding `*_input` field.
+- Every LLM call and tool call is logged and returned as structured trace events.
 - All tool errors become observations the agent can reason about — we never
   crash the loop on a flaky URL or a malformed query.
 - Older tool observations are compacted to short breadcrumbs after 2 turns, so
   per-iteration token usage stays roughly flat instead of growing linearly.
 """
-from typing import Literal, Union
+from typing import Literal
+
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
 from api.llm import GROQ_LLAMA, call_structured_groq
 from worker.tools import (
     CalculatorInput,
@@ -35,40 +40,67 @@ from worker.tools import (
 
 log = structlog.get_logger()
 
+
 # ============================================================
 # Tool choice schema — what the LLM outputs each turn
 # ============================================================
 
-class SearchAction(BaseModel):
-    """Run web_search."""
-    tool: Literal["web_search"] = "web_search"
-    input: WebSearchInput
+ToolName = Literal["web_search", "web_fetch", "calculator", "finish"]
 
-class FetchAction(BaseModel):
-    """Run web_fetch."""
-    tool: Literal["web_fetch"] = "web_fetch"
-    input: WebFetchInput
-
-class CalculatorAction(BaseModel):
-    """Run calculator."""
-    tool: Literal["calculator"] = "calculator"
-    input: CalculatorInput
-
-class FinishAction(BaseModel):
-    """Terminal tool — call this when you have enough to answer."""
-    tool: Literal["finish"] = "finish"
-    input: FinishInput
-
-ToolAction = Union[SearchAction, FetchAction, CalculatorAction, FinishAction]
 
 class AgentChoice(BaseModel):
-    """What the LLM returns on each turn."""
+    """Flat tool-choice schema compatible with Groq's tool validator.
+
+    The LLM picks ONE tool via `tool`, then fills in ONLY the matching
+    `*_input` field. The other input fields should be left as null.
+
+    We validate after-the-fact that the correct input field is populated,
+    rather than using a discriminated union (which Groq's validator rejects
+    as nested-object).
+    """
     thought: str = Field(
         description="One sentence: why you're choosing this tool right now. "
                     "Helps you reason step-by-step.",
         max_length=400,
     )
-    action: ToolAction
+    tool: ToolName = Field(
+        description="Which tool to call. Exactly one of: web_search, web_fetch, calculator, finish."
+    )
+    # Populate ONLY the one matching the `tool` field above. Leave the others null.
+    search_input: WebSearchInput | None = Field(
+        default=None,
+        description="REQUIRED if tool='web_search', otherwise null.",
+    )
+    fetch_input: WebFetchInput | None = Field(
+        default=None,
+        description="REQUIRED if tool='web_fetch', otherwise null.",
+    )
+    calculator_input: CalculatorInput | None = Field(
+        default=None,
+        description="REQUIRED if tool='calculator', otherwise null.",
+    )
+    finish_input: FinishInput | None = Field(
+        default=None,
+        description="REQUIRED if tool='finish', otherwise null.",
+    )
+
+    @model_validator(mode="after")
+    def check_input_matches_tool(self) -> "AgentChoice":
+        """Ensure the correct input field is populated for the chosen tool."""
+        mapping = {
+            "web_search": self.search_input,
+            "web_fetch": self.fetch_input,
+            "calculator": self.calculator_input,
+            "finish": self.finish_input,
+        }
+        expected = mapping[self.tool]
+        if expected is None:
+            raise ValueError(
+                f"tool='{self.tool}' but the matching input field is null. "
+                f"You must populate the input for the chosen tool."
+            )
+        return self
+
 
 # ============================================================
 # Output schemas — what the researcher produces
@@ -83,6 +115,7 @@ class MiniReport(BaseModel):
     iterations: int
     terminated_reason: Literal["finish", "iteration_cap", "error"]
     trace: list[dict]
+
 
 # ============================================================
 # Prompts
@@ -115,16 +148,29 @@ RULES:
 - You have at most 5 tool calls. Budget them. Don't search 5 times before fetching anything.
 - Each turn, use the "thought" field to briefly justify your choice.
 
+OUTPUT FORMAT (CRITICAL):
+Each turn, you output:
+  - thought: one sentence of reasoning
+  - tool: one of "web_search", "web_fetch", "calculator", "finish"
+  - the matching input field populated for the chosen tool:
+      * if tool=web_search → populate search_input
+      * if tool=web_fetch  → populate fetch_input
+      * if tool=calculator → populate calculator_input
+      * if tool=finish     → populate finish_input
+  - leave the other input fields as null.
+
 NOTE on history: older observations in this conversation may appear as compact
 breadcrumbs like "Observation from web_fetch: [compacted — original was N chars]".
 That just means you already consumed that content earlier. Don't re-fetch the same URL.
 """
+
 
 # ============================================================
 # The loop
 # ============================================================
 
 MAX_ITERATIONS = 5
+
 
 async def run_research_loop(sub_question: str) -> MiniReport:
     """Drive the agent through its tool-use loop until finish or cap."""
@@ -162,44 +208,41 @@ async def run_research_loop(sub_question: str) -> MiniReport:
             "payload": {
                 "iteration": iterations,
                 "thought": choice.thought,
-                "tool": choice.action.tool,
+                "tool": choice.tool,
             },
         })
 
-        # --- Tool dispatch ---
-        action = choice.action
-
-        if isinstance(action, FinishAction):
+        # --- Finish is terminal ---
+        if choice.tool == "finish":
             log.info("researcher.finish", iterations=iterations)
-            trace.append({"kind": "tool_finish", "payload": action.input.model_dump()})
+            finish = choice.finish_input  # guaranteed non-None by the model_validator
+            trace.append({"kind": "tool_finish", "payload": finish.model_dump()})
             return MiniReport(
                 sub_question=sub_question,
-                summary=action.input.summary,
-                citations=[c.model_dump() for c in action.input.citations],
-                confidence_notes=action.input.confidence_notes,
+                summary=finish.summary,
+                citations=[c.model_dump() for c in finish.citations],
+                confidence_notes=finish.confidence_notes,
                 iterations=iterations,
                 terminated_reason="finish",
                 trace=trace,
             )
 
-        # Run the chosen tool and get an observation
-        observation_text = await _dispatch_tool(action, trace)
+        # --- Tool dispatch ---
+        observation_text = await _dispatch_tool(choice, trace)
 
         # Add both assistant intent and tool observation to conversation history
+        # Serialize just the populated input, not the whole AgentChoice object
+        input_for_history = _input_for_tool(choice)
         messages.append({
             "role": "assistant",
-            "content": f"Thought: {choice.thought}\nTool: {action.tool}\nInput: {action.input.model_dump_json()}",
+            "content": f"Thought: {choice.thought}\nTool: {choice.tool}\nInput: {input_for_history.model_dump_json()}",
         })
         messages.append({
             "role": "user",
-            "content": f"Observation from {action.tool}:\n{observation_text}",
+            "content": f"Observation from {choice.tool}:\n{observation_text}",
         })
 
         # --- Compact older observations to save tokens ---
-        # Any observation older than the most recent 2 turns gets collapsed to
-        # a short breadcrumb. The agent has already consumed its relevant bits
-        # by now; keeping the full text in context just inflates every future
-        # LLM call. This typically saves 60-70% of tokens on iteration 3+.
         _compact_old_observations(messages)
 
     # --- Iteration cap hit ---
@@ -207,13 +250,28 @@ async def run_research_loop(sub_question: str) -> MiniReport:
     trace.append({"kind": "iteration_cap", "payload": {"iterations": iterations}})
     return _emergency_report(sub_question, iterations, trace, reason="iteration_cap")
 
-async def _dispatch_tool(action: ToolAction, trace: list[dict]) -> str:
+
+def _input_for_tool(choice: AgentChoice) -> BaseModel:
+    """Pull out the populated input field for the chosen tool."""
+    if choice.tool == "web_search":
+        return choice.search_input
+    if choice.tool == "web_fetch":
+        return choice.fetch_input
+    if choice.tool == "calculator":
+        return choice.calculator_input
+    if choice.tool == "finish":
+        return choice.finish_input
+    raise ValueError(f"Unknown tool: {choice.tool}")
+
+
+async def _dispatch_tool(choice: AgentChoice, trace: list[dict]) -> str:
     """Run the chosen tool and return a text observation for the LLM."""
-    if isinstance(action, SearchAction):
-        result = await web_search(action.input)
+    if choice.tool == "web_search":
+        inp = choice.search_input
+        result = await web_search(inp)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "web_search",
-            "input": action.input.model_dump(),
+            "input": inp.model_dump(),
             "result_summary": f"{len(result.results)} results, status={result.status}",
         }})
         if result.status == "error":
@@ -225,11 +283,12 @@ async def _dispatch_tool(action: ToolAction, trace: list[dict]) -> str:
             lines.append(f"[{i}] {r.title}\n    URL: {r.url}\n    {r.snippet}")
         return "\n".join(lines)
 
-    if isinstance(action, FetchAction):
-        result = await web_fetch(action.input)
+    if choice.tool == "web_fetch":
+        inp = choice.fetch_input
+        result = await web_fetch(inp)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "web_fetch",
-            "input": action.input.model_dump(),
+            "input": inp.model_dump(),
             "result_summary": f"status={result.status}, length={result.content_length}",
         }})
         if result.status == "error":
@@ -237,18 +296,20 @@ async def _dispatch_tool(action: ToolAction, trace: list[dict]) -> str:
         marker = " (truncated)" if result.truncated else ""
         return f"Fetched {result.url}{marker} ({result.content_length} chars):\n\n{result.content}"
 
-    if isinstance(action, CalculatorAction):
-        result = await calculator(action.input)
+    if choice.tool == "calculator":
+        inp = choice.calculator_input
+        result = await calculator(inp)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "calculator",
-            "input": action.input.model_dump(),
+            "input": inp.model_dump(),
             "result_summary": f"status={result.status}",
         }})
         if result.status == "error":
             return f"Calculator error: {result.error}"
-        return f"{action.input.expression} = {result.result}"
+        return f"{inp.expression} = {result.result}"
 
-    return f"Unknown tool: {action}"
+    return f"Unknown tool: {choice.tool}"
+
 
 def _compact_old_observations(messages: list[dict]) -> None:
     """Replace old tool observations with short breadcrumbs to save tokens.
@@ -261,7 +322,7 @@ def _compact_old_observations(messages: list[dict]) -> None:
     Index 0 is the system prompt, index 1 is the original user question;
     both are always preserved verbatim. After that, messages alternate
     assistant (thought + tool choice) and user (tool observation).
-     
+
     Mutates the messages list in place. Idempotent.
     """
     observation_indices = [
@@ -269,7 +330,6 @@ def _compact_old_observations(messages: list[dict]) -> None:
         if m["role"] == "user" and i >= 2 and m["content"].startswith("Observation from")
     ]
 
-    # Keep the most recent 2 observations verbatim. Compact anything older.
     if len(observation_indices) <= 2:
         return
 
@@ -277,14 +337,14 @@ def _compact_old_observations(messages: list[dict]) -> None:
     for idx in to_compact:
         content = messages[idx]["content"]
         first_line = content.split("\n", 1)[0]
-        # Idempotent: skip if already compacted
         if "[compacted" in first_line:
             continue
         messages[idx] = {
             "role": "user",
             "content": f"{first_line} [compacted — original was {len(content)} chars]",
         }
- 
+
+
 def _emergency_report(
     sub_question: str, iterations: int, trace: list[dict], reason: str,
 ) -> MiniReport:
@@ -296,5 +356,5 @@ def _emergency_report(
         confidence_notes=f"Agent terminated due to: {reason}",
         iterations=iterations,
         terminated_reason=reason,
-        trace=trace,    
+        trace=trace,
     )

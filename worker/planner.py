@@ -53,8 +53,8 @@ class ResearchPlan(BaseModel):
     )
     sub_questions: list[SubQuestion] = Field(
         min_length=3,
-        max_length=7,
-        description="3-7 focused sub-questions whose answers together address "
+        max_length=5,
+        description="3-5 focused sub-questions whose answers together address "
                     "the user's question.",
     )
 
@@ -63,8 +63,7 @@ class ResearchPlan(BaseModel):
 
 PLANNER_SYSTEM_PROMPT = """You are the Planner for Agora, a multi-agent research system.
 
-Your job: take a user's research question and decompose it into 3-7 focused sub-questions that independent researcher agents can investigate in parallel. The answers to the sub-questions, combined, should fully address the user's question.
-
+Your job: take a user's research question and decompose it into 3-5 focused sub-questions that independent researcher agents can investigate in parallel. The answers to the sub-questions, combined, should fully address the user's question.
 RULES for good decomposition:
 
 1. COVERAGE: Every aspect of the user's question must be covered by at least one sub-question. Nothing important should fall through the cracks.
@@ -75,7 +74,7 @@ RULES for good decomposition:
 
 4. NO META-QUESTIONS: Don't include sub-questions like "What are the key considerations?" or "What should we think about?". Every sub-question must have a factual answer.
 
-5. RIGHT-SIZE: For simple factual questions, 3 sub-questions. For comparisons, 4-5. For complex multi-part questions, 6-7. Don't pad.
+5. RIGHT-SIZE: For simple factual questions, 3 sub-questions. For moderate complexity, 4. For complex multi-part questions, 5. Don't pad. Prefer fewer, sharper sub-questions over many overlapping ones.
 
 6. APPROACH TAG: Tag each sub-question with the best research approach:
    - web_search: broad factual questions best served by searching and reading multiple sources

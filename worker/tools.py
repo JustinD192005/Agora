@@ -55,7 +55,7 @@ class WebSearchOutput(BaseModel):
 
 
 async def web_search(input: WebSearchInput) -> WebSearchOutput:
-    """Call Tavily's search API. Returns up to 5 results."""
+    """Call Tavily's search API. Returns up to 3 results."""
     log.info("tool.web_search", query=input.query)
 
     try:
@@ -65,7 +65,7 @@ async def web_search(input: WebSearchInput) -> WebSearchOutput:
                 json={
                     "api_key": _settings.tavily_api_key,
                     "query": input.query,
-                    "max_results": 5,
+                    "max_results": 3,
                     "search_depth": "basic",
                 },
             )
@@ -76,7 +76,7 @@ async def web_search(input: WebSearchInput) -> WebSearchOutput:
             SearchResult(
                 title=r.get("title", ""),
                 url=r.get("url", ""),
-                snippet=r.get("content", "")[:400],  # cap snippet length
+                snippet=r.get("content", "")[:200],  # cap snippet length
             )
             for r in data.get("results", [])
         ]
@@ -109,9 +109,10 @@ class WebFetchOutput(BaseModel):
     error: str | None = None
 
 
-# Hard cap on extracted text: 50KB. Most research needs don't exceed this,
-# and longer content blows up LLM context and cost.
-MAX_CONTENT_CHARS = 8000
+# Hard cap on extracted text. Most articles' key arguments appear in the
+# first ~5K chars (intro, thesis, main paragraphs). Longer content inflates
+# every subsequent LLM call via conversation history.
+MAX_CONTENT_CHARS = 5000
 
 
 async def web_fetch(input: WebFetchInput) -> WebFetchOutput:

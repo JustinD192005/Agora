@@ -32,3 +32,10 @@ plan-output.txt
 
 researcher-output*.json
 researcher-output*.txt
+
+# Scratch debugging outputs (don't commit)
+synth-output.json
+synth-output-pretty.json
+researcher-output*.json
+researcher-output*.txt
+plan-output.txt
