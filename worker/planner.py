@@ -91,13 +91,15 @@ USER QUESTION:
 
 # ---------- Entry point called by the worker ----------
 
-async def generate_plan(question: str) -> ResearchPlan:
+async def generate_plan(question: str, use_cache: bool = True) -> ResearchPlan:
     """Call Gemini to produce a structured research plan."""
     prompt = PLANNER_SYSTEM_PROMPT.format(question=question)
     plan = await call_structured(
         model=GEMINI_FLASH,
         prompt=prompt,
         response_model=ResearchPlan,
+        kind="planner",
+        use_cache=use_cache,
         max_tokens=2048,
         temperature=0.3,
     )

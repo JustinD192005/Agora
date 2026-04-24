@@ -1,5 +1,5 @@
 """Arq worker — consumes jobs from Redis and processes them."""
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import structlog
@@ -16,6 +16,7 @@ from worker.synthesizer import SubQuestionResult, synthesize
 log = structlog.get_logger()
 settings = get_settings()
 
+
 # --- Pacing config ---
 # Spacing (in seconds) between researcher enqueue times. Each researcher gets
 # its start deferred by idx * RESEARCHER_STAGGER_SECONDS, so opening LLM calls
@@ -23,8 +24,21 @@ settings = get_settings()
 RESEARCHER_STAGGER_SECONDS = 3
 
 
+# ---------- helpers ----------
+
+def _read_bust_cache(run: Run) -> bool:
+    """Pull the bust_cache flag out of the run's metadata, defaulting to False.
+
+    The API endpoint stores this in run.metadata_["bust_cache"] at submission time.
+    Worker jobs read it from there instead of threading an extra argument through
+    every enqueue call.
+    """
+    meta = run.metadata_ or {}
+    return bool(meta.get("bust_cache", False))
+
+
 # ============================================================
-# Planner (Day 2 + Day 4 fan-out)
+# Planner (Day 2 + Day 4 fan-out + Day 6 cache awareness)
 # ============================================================
 
 async def run_planner(ctx: dict, run_id: str) -> None:
@@ -40,16 +54,19 @@ async def run_planner(ctx: dict, run_id: str) -> None:
             return
 
         question = run.user_question
+        bust_cache = _read_bust_cache(run)
+        use_cache = not bust_cache
+
         run.status = "planning"
         session.add(Event(
             run_id=run_uuid,
             kind="planner_started",
-            payload={"question": question},
+            payload={"question": question, "bust_cache": bust_cache},
         ))
         await session.commit()
 
     try:
-        plan = await generate_plan(question)
+        plan = await generate_plan(question, use_cache=use_cache)
     except Exception as e:
         log.exception("planner.failed", run_id=run_id, error=str(e))
         async with SessionLocal() as session:
@@ -95,10 +112,7 @@ async def run_planner(ctx: dict, run_id: str) -> None:
         run.expected_researchers = num_sub_questions
         await session.commit()
 
-    # Fan out with pacing: stagger researcher starts by RESEARCHER_STAGGER_SECONDS
-    # per job to avoid burst-hammering the LLM's rate limiter. Researchers still
-    # run in parallel overall, but their opening LLM calls don't all hit the
-    # upstream API in the same second.
+    # --- Fan out with pacing ---
     redis = ctx["redis"]
     enqueued_jobs: list[str] = []
     for idx in range(num_sub_questions):
@@ -132,7 +146,7 @@ async def run_planner(ctx: dict, run_id: str) -> None:
 
 
 # ============================================================
-# Researcher (Day 3 + Day 4 fan-in trigger)
+# Researcher (Day 3 + Day 4 fan-in + Day 6 cache awareness)
 # ============================================================
 
 async def run_researcher(ctx: dict, run_id: str, sub_question_index: int) -> None:
@@ -140,8 +154,16 @@ async def run_researcher(ctx: dict, run_id: str, sub_question_index: int) -> Non
     run_uuid = UUID(run_id)
     log.info("researcher.task.start", run_id=run_id, sub_q_index=sub_question_index)
 
-    # --- Load the plan ---
+    # --- Load the plan and the bust_cache flag ---
     async with SessionLocal() as session:
+        run_result = await session.execute(select(Run).where(Run.id == run_uuid))
+        run = run_result.scalar_one_or_none()
+        if run is None:
+            log.error("researcher.run_not_found", run_id=run_id)
+            return
+        bust_cache = _read_bust_cache(run)
+        use_cache = not bust_cache
+
         result = await session.execute(
             select(Task).where(
                 Task.run_id == run_uuid,
@@ -192,7 +214,7 @@ async def run_researcher(ctx: dict, run_id: str, sub_question_index: int) -> Non
 
     # --- Run the loop ---
     try:
-        report = await run_research_loop(sub_question_text)
+        report = await run_research_loop(sub_question_text, use_cache=use_cache)
     except Exception as e:
         log.exception("researcher.crashed", run_id=run_id, sub_q_index=sub_question_index)
         async with SessionLocal() as session:
@@ -261,24 +283,20 @@ async def run_researcher(ctx: dict, run_id: str, sub_question_index: int) -> Non
 
 
 # ============================================================
-# Synthesizer (Day 4 Phase 3 — real implementation)
+# Synthesizer (Day 4 Phase 3 + Day 6 cache awareness)
 # ============================================================
 
 async def run_synthesizer(ctx: dict, run_id: str) -> None:
-    """Generate the final synthesized answer from all mini-reports.
-
-    Reads the planner task (for the plan + interpretation) and every
-    researcher task (for mini-reports). Calls Gemini to produce the
-    final answer, persists it as the run's final_answer, and marks
-    the run completed.
-    """
+    """Generate the final synthesized answer from all mini-reports."""
     run_uuid = UUID(run_id)
     log.info("synthesizer.start", run_id=run_id)
 
-    # --- Load everything we need: run, planner task, researcher tasks ---
+    # --- Load everything we need ---
     async with SessionLocal() as session:
         run_result = await session.execute(select(Run).where(Run.id == run_uuid))
         run = run_result.scalar_one()
+        bust_cache = _read_bust_cache(run)
+        use_cache = not bust_cache
 
         planner_result = await session.execute(
             select(Task).where(Task.run_id == run_uuid, Task.kind == "planner")
@@ -296,7 +314,6 @@ async def run_synthesizer(ctx: dict, run_id: str) -> None:
     plan = planner_task.output or {}
     interpretation = plan.get("interpretation", "")
 
-    # --- Convert researcher task rows into SubQuestionResult objects ---
     results: list[SubQuestionResult] = []
     for t in researcher_tasks:
         output = t.output or {}
@@ -323,6 +340,7 @@ async def run_synthesizer(ctx: dict, run_id: str) -> None:
             question=question,
             interpretation=interpretation,
             results=results,
+            use_cache=use_cache,
         )
     except Exception as e:
         log.exception("synthesizer.failed", run_id=run_id, error=str(e))
@@ -347,7 +365,7 @@ async def run_synthesizer(ctx: dict, run_id: str) -> None:
         num_citations=len(report.citations),
     )
 
-    # --- Persist: a Task row for observability, final_answer on the run ---
+    # --- Persist ---
     async with SessionLocal() as session:
         run_result = await session.execute(select(Run).where(Run.id == run_uuid))
         run = run_result.scalar_one()
@@ -389,8 +407,15 @@ async def run_synthesizer(ctx: dict, run_id: str) -> None:
 # ============================================================
 
 class WorkerSettings:
-    """Arq worker configuration — arq imports this class by path."""
+    """Arq worker configuration — arq imports this class by path.
+
+    max_tries=1: we handle LLM-layer retries via tenacity inside each function,
+    and our emergency reports make failure a valid terminal state. Arq-level
+    retries would just create duplicate Task rows for the same sub_question,
+    inflating our fan-in counts and polluting the task table.
+    """
     functions = [run_planner, run_researcher, run_synthesizer]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 10
+    max_tries = 1
     job_timeout = 300

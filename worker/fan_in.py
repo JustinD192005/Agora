@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select, func
+from sqlalchemy import Integer, select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: F401  (future use)
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,9 +72,15 @@ async def try_enqueue_synthesizer(run_id: str, redis) -> bool:
             log.warning("fan_in.no_expected_count", run_id=run_id)
             return False
 
-        # --- Count terminal researcher tasks ---
+        # --- Count terminal researcher tasks (by distinct sub_question_index) ---
+        # Using DISTINCT sub_question_index defends against the case where
+        # multiple task rows exist for the same sub-question (e.g. if arq
+        # retries somehow created duplicates). We care about "how many
+        # distinct sub-questions have reached terminal status", not "how
+        # many task rows exist". With max_tries=1 on WorkerSettings this
+        # should be a no-op, but it's defense in depth.
         count_stmt = (
-            select(func.count())
+            select(func.count(func.distinct(Task.input["sub_question_index"].astext.cast(Integer))))
             .select_from(Task)
             .where(
                 Task.run_id == run_uuid,

@@ -67,11 +67,13 @@ class SynthesisReport(BaseModel):
         max_length=4000,
     )
     citations: list[FinalCitation] = Field(
-        min_length=1,
+        min_length=0,
         max_length=15,
         description="Citations backing key claims in the answer. Dedupe by URL — "
                     "don't cite the same URL twice. Prefer citations that cover "
-                    "different sub-questions.",
+                    "different sub-questions. If NO researchers produced real "
+                    "citations (all failed), return an empty list rather than "
+                    "fabricating placeholder citations.",
     )
     coverage: list[CoverageNote] = Field(
         description="One note per sub-question, in order.",
@@ -95,7 +97,7 @@ RULES:
 
 1. GROUND IN EVIDENCE. Every factual claim must trace back to something in the mini-reports. Do not invent facts, statistics, or product features that weren't in the source material.
 
-2. NO FABRICATED CITATIONS. Only cite URLs and quotes that appear in the researchers' citations. If a sub-question produced no citations (e.g. researcher failed), don't cite anything for that part — acknowledge the gap instead.
+2. NO FABRICATED CITATIONS. Only cite URLs and quotes that appear in the researchers' citations. If a sub-question produced no citations (e.g. researcher failed), don't cite anything for that part — acknowledge the gap instead. If NO researchers produced any real citations (all failed), return an EMPTY citations list. Do not invent placeholder URLs like "example.com" or "about:blank".
 
 3. INTEGRATE, DON'T CONCATENATE. Don't just paste the 5 sub-answers back-to-back. Find the connections, contrasts, and themes across sub-questions. The whole should be more coherent than the parts.
 
@@ -159,6 +161,7 @@ async def synthesize(
     question: str,
     interpretation: str,
     results: list[SubQuestionResult],
+    use_cache: bool = True,
 ) -> SynthesisReport:
     """Call Gemini to produce the final synthesized answer."""
     mini_reports_text = _format_mini_reports(results)
@@ -172,7 +175,9 @@ async def synthesize(
         model=GEMINI_FLASH,
         prompt=prompt,
         response_model=SynthesisReport,
-        max_tokens=4096,  # synthesizer output can be longer than planner
+        kind="synthesizer",
+        use_cache=use_cache,
+        max_tokens=4096,
         temperature=0.3,
     )
     return report

@@ -35,6 +35,12 @@ app = FastAPI(title="Agora", lifespan=lifespan)
 
 class SubmitRunRequest(BaseModel):
     question: str = Field(min_length=5, max_length=500)
+    bust_cache: bool = Field(
+        default=False,
+        description="If true, disable the deterministic-replay cache for this "
+                    "specific run. Forces fresh LLM calls and web fetches. "
+                    "Useful when testing prompt or tool changes.",
+    )
 
 
 class RunResponse(BaseModel):
@@ -63,7 +69,11 @@ async def health() -> dict:
 @app.post("/runs", response_model=RunResponse, status_code=201)
 async def submit_run(payload: SubmitRunRequest) -> RunResponse:
     async with SessionLocal() as session:
-        run = Run(user_question=payload.question, status="pending")
+        run = Run(
+            user_question=payload.question,
+            status="pending",
+            metadata_={"bust_cache": payload.bust_cache},
+        )
         session.add(run)
         await session.flush()
 
@@ -71,15 +81,20 @@ async def submit_run(payload: SubmitRunRequest) -> RunResponse:
         session.add(Event(
             run_id=run.id,
             kind="run_created",
-            payload={"question": payload.question},
+            payload={"question": payload.question, "bust_cache": payload.bust_cache},
         ))
         await session.commit()
         await session.refresh(run)
 
-    # Enqueue planner job
+    # Enqueue planner job — the planner reads bust_cache from the run row
     await app.state.arq.enqueue_job("run_planner", str(run.id))
 
-    log.info("run.submitted", run_id=str(run.id), question=payload.question)
+    log.info(
+        "run.submitted",
+        run_id=str(run.id),
+        question=payload.question,
+        bust_cache=payload.bust_cache,
+    )
     return RunResponse.from_orm(run)
 
 

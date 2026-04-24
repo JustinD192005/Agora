@@ -172,7 +172,7 @@ That just means you already consumed that content earlier. Don't re-fetch the sa
 MAX_ITERATIONS = 5
 
 
-async def run_research_loop(sub_question: str) -> MiniReport:
+async def run_research_loop(sub_question: str, use_cache: bool = True) -> MiniReport:
     """Drive the agent through its tool-use loop until finish or cap."""
     log.info("researcher.start", sub_question=sub_question[:100])
 
@@ -194,6 +194,7 @@ async def run_research_loop(sub_question: str) -> MiniReport:
                 model=GROQ_LLAMA,
                 messages=messages,
                 response_model=AgentChoice,
+                use_cache=use_cache,
             )
         except Exception as exc:
             log.exception("researcher.llm_failed", iteration=iterations)
@@ -228,7 +229,7 @@ async def run_research_loop(sub_question: str) -> MiniReport:
             )
 
         # --- Tool dispatch ---
-        observation_text = await _dispatch_tool(choice, trace)
+        observation_text = await _dispatch_tool(choice, trace, use_cache=use_cache)
 
         # Add both assistant intent and tool observation to conversation history
         # Serialize just the populated input, not the whole AgentChoice object
@@ -264,11 +265,11 @@ def _input_for_tool(choice: AgentChoice) -> BaseModel:
     raise ValueError(f"Unknown tool: {choice.tool}")
 
 
-async def _dispatch_tool(choice: AgentChoice, trace: list[dict]) -> str:
+async def _dispatch_tool(choice: AgentChoice, trace: list[dict], use_cache: bool = True) -> str:
     """Run the chosen tool and return a text observation for the LLM."""
     if choice.tool == "web_search":
         inp = choice.search_input
-        result = await web_search(inp)
+        result = await web_search(inp, use_cache=use_cache)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "web_search",
             "input": inp.model_dump(),
@@ -285,7 +286,7 @@ async def _dispatch_tool(choice: AgentChoice, trace: list[dict]) -> str:
 
     if choice.tool == "web_fetch":
         inp = choice.fetch_input
-        result = await web_fetch(inp)
+        result = await web_fetch(inp, use_cache=use_cache)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "web_fetch",
             "input": inp.model_dump(),

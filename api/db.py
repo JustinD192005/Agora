@@ -62,6 +62,26 @@ class Event(Base):
     run: Mapped[Run] = relationship(back_populates="events")
 
 
+class LLMCache(Base):
+    """Cache of LLM calls and tool results, keyed by input hash.
+
+    Used for deterministic replay: identical input with the same model/tool
+    returns the cached output instead of re-running the external call.
+    """
+    __tablename__ = "llm_cache"
+
+    input_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)  # "llm" | "tool"
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    output: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 # Engine + session factory
 _settings = get_settings()
 engine = create_async_engine(_settings.database_url, echo=False, pool_size=5, max_overflow=10)

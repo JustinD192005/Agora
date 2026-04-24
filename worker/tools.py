@@ -25,6 +25,14 @@ from pydantic import BaseModel, Field
 
 from api.config import get_settings
 
+from api.cache import (
+    TOOL_TTL_WEB_FETCH,
+    TOOL_TTL_WEB_SEARCH,
+    get_cached,
+    hash_input,
+    set_cached,
+)
+
 log = structlog.get_logger()
 _settings = get_settings()
 
@@ -54,10 +62,24 @@ class WebSearchOutput(BaseModel):
     error: str | None = None
 
 
-async def web_search(input: WebSearchInput) -> WebSearchOutput:
-    """Call Tavily's search API. Returns up to 3 results."""
+async def web_search(input: WebSearchInput, use_cache: bool = True) -> WebSearchOutput:
+    """Call Tavily's search API. Returns up to 3 results.
+
+    Cached with a 6-hour TTL — search rankings drift but not THAT fast.
+    """
     log.info("tool.web_search", query=input.query)
 
+    # --- Cache lookup ---
+    cache_payload = {"query": input.query, "max_results": 3}
+    input_hash = hash_input(cache_payload)
+
+    if use_cache:
+        cached = await get_cached(input_hash, kind="tool", model="web_search")
+        if cached is not None:
+            log.info("tool.web_search.cache_hit", query=input.query)
+            return WebSearchOutput.model_validate(cached)
+
+    # --- Cache miss: real call ---
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -76,14 +98,28 @@ async def web_search(input: WebSearchInput) -> WebSearchOutput:
             SearchResult(
                 title=r.get("title", ""),
                 url=r.get("url", ""),
-                snippet=r.get("content", "")[:200],  # cap snippet length
+                snippet=r.get("content", "")[:200],
             )
             for r in data.get("results", [])
         ]
-        return WebSearchOutput(status="ok", query=input.query, results=results)
+        output = WebSearchOutput(status="ok", query=input.query, results=results)
+
+        # --- Store in cache (only successful calls) ---
+        if use_cache:
+            await set_cached(
+                input_hash,
+                kind="tool",
+                model="web_search",
+                output=output.model_dump(mode="json"),
+                ttl=TOOL_TTL_WEB_SEARCH,
+            )
+
+        return output
 
     except Exception as exc:
         log.warning("tool.web_search.failed", query=input.query, error=str(exc)[:200])
+        # Errors are NOT cached — next researcher that tries this query
+        # should get a chance to succeed.
         return WebSearchOutput(
             status="error",
             query=input.query,
@@ -115,8 +151,12 @@ class WebFetchOutput(BaseModel):
 MAX_CONTENT_CHARS = 5000
 
 
-async def web_fetch(input: WebFetchInput) -> WebFetchOutput:
-    """Fetch a URL and extract main content using trafilatura."""
+async def web_fetch(input: WebFetchInput, use_cache: bool = True) -> WebFetchOutput:
+    """Fetch a URL and extract main content using trafilatura.
+
+    Cached with a 24-hour TTL — web content changes but most articles stay
+    stable for at least a day.
+    """
     log.info("tool.web_fetch", url=input.url)
 
     if not input.url.startswith(("http://", "https://")):
@@ -126,6 +166,17 @@ async def web_fetch(input: WebFetchInput) -> WebFetchOutput:
             error="URL must start with http:// or https://",
         )
 
+    # --- Cache lookup ---
+    cache_payload = {"url": input.url, "max_chars": MAX_CONTENT_CHARS}
+    input_hash = hash_input(cache_payload)
+
+    if use_cache:
+        cached = await get_cached(input_hash, kind="tool", model="web_fetch")
+        if cached is not None:
+            log.info("tool.web_fetch.cache_hit", url=input.url)
+            return WebFetchOutput.model_validate(cached)
+
+    # --- Cache miss: real call ---
     try:
         async with httpx.AsyncClient(
             timeout=10.0,
@@ -136,26 +187,37 @@ async def web_fetch(input: WebFetchInput) -> WebFetchOutput:
             resp.raise_for_status()
             html = resp.text
 
-        # trafilatura extracts the main article content, stripping nav/ads/etc
         extracted = trafilatura.extract(html) or ""
-
         truncated = len(extracted) > MAX_CONTENT_CHARS
         content = extracted[:MAX_CONTENT_CHARS]
 
         if not content:
+            # Don't cache empty extractions — a site's HTML might need re-parsing later
             return WebFetchOutput(
                 status="error",
                 url=input.url,
                 error="Page fetched but no readable content could be extracted",
             )
 
-        return WebFetchOutput(
+        output = WebFetchOutput(
             status="ok",
             url=input.url,
             content=content,
             content_length=len(content),
             truncated=truncated,
         )
+
+        # --- Store in cache (only successful fetches with real content) ---
+        if use_cache:
+            await set_cached(
+                input_hash,
+                kind="tool",
+                model="web_fetch",
+                output=output.model_dump(mode="json"),
+                ttl=TOOL_TTL_WEB_FETCH,
+            )
+
+        return output
 
     except httpx.TimeoutException:
         return WebFetchOutput(status="error", url=input.url, error="Fetch timed out after 10s")

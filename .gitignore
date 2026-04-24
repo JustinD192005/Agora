@@ -41,3 +41,4 @@ researcher-output*.txt
 /researcher-*.json
 /researcher-*.txt
 /plan-output.txt
+/scripts/test_*.py
