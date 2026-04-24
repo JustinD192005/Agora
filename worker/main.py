@@ -1,5 +1,5 @@
 """Arq worker — consumes jobs from Redis and processes them."""
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import UUID
 
 import structlog
@@ -15,6 +15,12 @@ from worker.synthesizer import SubQuestionResult, synthesize
 
 log = structlog.get_logger()
 settings = get_settings()
+
+# --- Pacing config ---
+# Spacing (in seconds) between researcher enqueue times. Each researcher gets
+# its start deferred by idx * RESEARCHER_STAGGER_SECONDS, so opening LLM calls
+# are spread over a window rather than bursting in a single second.
+RESEARCHER_STAGGER_SECONDS = 3
 
 
 # ============================================================
@@ -89,11 +95,19 @@ async def run_planner(ctx: dict, run_id: str) -> None:
         run.expected_researchers = num_sub_questions
         await session.commit()
 
-    # --- Fan out: enqueue one researcher per sub-question ---
+    # Fan out with pacing: stagger researcher starts by RESEARCHER_STAGGER_SECONDS
+    # per job to avoid burst-hammering the LLM's rate limiter. Researchers still
+    # run in parallel overall, but their opening LLM calls don't all hit the
+    # upstream API in the same second.
     redis = ctx["redis"]
     enqueued_jobs: list[str] = []
     for idx in range(num_sub_questions):
-        job = await redis.enqueue_job("run_researcher", run_id, idx)
+        job = await redis.enqueue_job(
+            "run_researcher",
+            run_id,
+            idx,
+            _defer_by=timedelta(seconds=idx * RESEARCHER_STAGGER_SECONDS),
+        )
         enqueued_jobs.append(job.job_id)
 
     log.info(
