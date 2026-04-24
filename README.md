@@ -1,4 +1,3 @@
----
 
 ## Key engineering decisions
 
@@ -12,7 +11,7 @@
 
 **Token-aware conversation management.** Older tool observations in the researcher's conversation history are compacted to short breadcrumbs after 2 turns, so per-iteration token usage stays roughly flat instead of growing linearly. Saves 40-65% tokens on longer runs.
 
----
+
 
 ## Tech stack
 
