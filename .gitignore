@@ -34,8 +34,10 @@ researcher-output*.json
 researcher-output*.txt
 
 # Scratch debugging outputs (don't commit)
-synth-output.json
-synth-output-pretty.json
-researcher-output*.json
-researcher-output*.txt
-plan-output.txt
+# Anything matching synth-*.json or researcher-* at repo root is scratch.
+# Curated artifacts live under docs/runs/.
+/synth-*.json
+/synth-*.txt
+/researcher-*.json
+/researcher-*.txt
+/plan-output.txt
