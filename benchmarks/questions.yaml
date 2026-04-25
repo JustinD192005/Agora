@@ -1,0 +1,177 @@
+# Agora benchmark question set
+#
+# Each question has:
+#   id: stable identifier for tracking
+#   category: comparison | definitional | analytical | time_sensitive | adversarial
+#   question: the user-facing question text
+#   expected_aspects: what a good answer should cover (used by the LLM judge for coverage scoring)
+#   expected_difficulty: easy | medium | hard
+#
+# Notes for whoever maintains this set:
+# - Keep questions to ~250 chars max so the planner has a clear focus.
+# - Aim for questions where multiple authoritative sources exist on the open web.
+# - Avoid questions about Anthropic, OpenAI, Google, or other model providers — Agora
+#   uses LLMs from those providers, and judging is biased on self-referential queries.
+# - Time-sensitive questions are scored more leniently because content drifts fast.
+
+questions:
+  # ---------- Comparisons (Agora's sweet spot) ----------
+  - id: redis-vs-kafka
+    category: comparison
+    question: "What are the tradeoffs between Redis and Kafka for real-time systems?"
+    expected_aspects:
+      - latency characteristics of each
+      - durability and persistence guarantees
+      - typical use cases for Redis (caching, sessions)
+      - typical use cases for Kafka (event streaming, log aggregation)
+      - when they're complementary vs. competitive
+    expected_difficulty: easy
+
+  - id: postgres-vs-mongodb
+    category: comparison
+    question: "What are the key differences between PostgreSQL and MongoDB for a SaaS backend, and when should each be chosen?"
+    expected_aspects:
+      - data model differences (relational vs document)
+      - schema flexibility tradeoffs
+      - performance and scalability characteristics
+      - SaaS-specific concerns like multi-tenancy
+    expected_difficulty: medium
+
+  - id: graphql-vs-rest
+    category: comparison
+    question: "What are the main architectural differences between GraphQL and REST APIs, and what are the tradeoffs for a mid-sized SaaS company?"
+    expected_aspects:
+      - request/response shape
+      - over-fetching and under-fetching
+      - tooling ecosystem maturity
+      - operational complexity (caching, monitoring)
+    expected_difficulty: medium
+
+  - id: service-mesh-vs-api-gateway
+    category: comparison
+    question: "How do service mesh architectures like Istio compare to API gateway patterns for microservice communication?"
+    expected_aspects:
+      - east-west vs north-south traffic
+      - what concerns each addresses (security, observability, routing)
+      - functional overlaps
+      - when they're complementary
+    expected_difficulty: medium
+
+  - id: monolith-vs-microservices
+    category: comparison
+    question: "When should an early-stage startup choose a monolithic architecture over microservices?"
+    expected_aspects:
+      - operational overhead
+      - team size considerations
+      - deployment complexity
+      - migration path from monolith to microservices
+    expected_difficulty: medium
+
+  # ---------- Definitional (easy mode, baseline) ----------
+  - id: what-is-raft
+    category: definitional
+    question: "What is the Raft consensus algorithm and what problem does it solve?"
+    expected_aspects:
+      - leader election
+      - log replication
+      - state machine replication
+      - relationship to Paxos
+    expected_difficulty: easy
+
+  - id: what-is-cap
+    category: definitional
+    question: "What is the CAP theorem and how does it apply to distributed database design?"
+    expected_aspects:
+      - consistency, availability, partition tolerance
+      - real-world tradeoffs (CP vs AP systems)
+      - examples of databases on each side
+    expected_difficulty: easy
+
+  - id: what-is-rag
+    category: definitional
+    question: "What is retrieval-augmented generation and how does it differ from fine-tuning a language model?"
+    expected_aspects:
+      - core RAG architecture (retriever + generator)
+      - cost and update tradeoffs vs fine-tuning
+      - typical embedding + vector store pipeline
+    expected_difficulty: easy
+
+  # ---------- Analytical (Agora's sweet spot) ----------
+  - id: vector-db-tradeoffs
+    category: analytical
+    question: "What are the key tradeoffs when choosing between Pinecone, Weaviate, and Qdrant for a production RAG system?"
+    expected_aspects:
+      - hosting model (managed vs self-hosted)
+      - performance characteristics
+      - cost structure
+      - ecosystem integrations
+    expected_difficulty: hard
+
+  - id: kubernetes-readiness
+    category: analytical
+    question: "When is a small engineering team ready to adopt Kubernetes, and what are the warning signs they're not?"
+    expected_aspects:
+      - operational maturity prerequisites
+      - team size and expertise considerations
+      - simpler alternatives (managed PaaS, ECS, Cloud Run)
+      - typical failure modes for premature adoption
+    expected_difficulty: hard
+
+  - id: orm-tradeoffs
+    category: analytical
+    question: "What are the tradeoffs of using an ORM versus writing raw SQL in a high-performance backend service?"
+    expected_aspects:
+      - query control and predictability
+      - N+1 problems
+      - team productivity tradeoffs
+      - hybrid approaches
+    expected_difficulty: medium
+
+  - id: event-sourcing-fit
+    category: analytical
+    question: "For what kinds of business domains is event sourcing a good architectural fit, and where does it create more problems than it solves?"
+    expected_aspects:
+      - domains with audit/regulatory requirements
+      - complex state machines
+      - operational complexity costs
+      - common anti-patterns
+    expected_difficulty: hard
+
+  # ---------- Time-sensitive (stress test for source quality) ----------
+  - id: postgres-recent-features
+    category: time_sensitive
+    question: "What are the most significant new features added to PostgreSQL in versions 16 and 17?"
+    expected_aspects:
+      - logical replication improvements
+      - performance optimizations
+      - SQL standard features added
+    expected_difficulty: medium
+
+  - id: ai-agent-frameworks-2026
+    category: time_sensitive
+    question: "What are the leading open-source frameworks for building agentic AI systems as of 2026, and what differentiates them?"
+    expected_aspects:
+      - LangChain / LangGraph
+      - DSPy or similar
+      - typical architectural patterns
+    expected_difficulty: hard
+
+  # ---------- Adversarial (sources likely to conflict) ----------
+  - id: typescript-vs-javascript
+    category: adversarial
+    question: "Is TypeScript worth adopting for a small team building a product MVP?"
+    expected_aspects:
+      - upfront cost (tooling, learning curve)
+      - long-term maintenance benefits
+      - acknowledgment of legitimate disagreement on this
+    expected_difficulty: medium
+
+  - id: rust-for-web-services
+    category: adversarial
+    question: "Should a typical SaaS company use Rust for their web backend, or is Go or Python a better choice?"
+    expected_aspects:
+      - ecosystem maturity differences
+      - hiring market
+      - performance vs developer velocity
+      - acknowledgment of context-dependence
+    expected_difficulty: hard
