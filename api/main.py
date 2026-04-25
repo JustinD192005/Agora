@@ -10,7 +10,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from api.config import get_settings
+from api.cors import configure_cors
 from api.db import Event, Run, SessionLocal
+from api.routes_runs import router as runs_router
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -29,6 +31,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Agora", lifespan=lifespan)
+configure_cors(app)
 
 
 # ---------- Request/response schemas ----------
@@ -106,3 +109,6 @@ async def get_run(run_id: UUID) -> RunResponse:
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
         return RunResponse.from_orm(run)
+
+
+app.include_router(runs_router)
