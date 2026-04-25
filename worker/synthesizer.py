@@ -57,6 +57,40 @@ class CoverageNote(BaseModel):
         max_length=200,
     )
 
+class SourceDisagreement(BaseModel):
+    """A contradiction between sources cited by different researchers."""
+    topic: str = Field(
+        max_length=200,
+        description="Brief description of WHAT the sources disagree about. "
+                    "E.g. 'MongoDB write performance vs PostgreSQL', "
+                    "'recommended Kubernetes adoption threshold'.",
+    )
+    claim_a: str = Field(
+        max_length=300,
+        description="One sentence stating what one set of sources claims.",
+    )
+    claim_b: str = Field(
+        max_length=300,
+        description="One sentence stating what the other set of sources claims.",
+    )
+    sources_a: list[str] = Field(
+        min_length=1,
+        max_length=4,
+        description="URLs supporting claim_a.",
+    )
+    sources_b: list[str] = Field(
+        min_length=1,
+        max_length=4,
+        description="URLs supporting claim_b.",
+    )
+    notes: str = Field(
+        default="",
+        max_length=300,
+        description="Optional: brief context about why this disagreement exists "
+                    "(e.g. different benchmarking methodologies, different versions, "
+                    "different opinion-vs-fact framing).",
+    )
+
 
 class SynthesisReport(BaseModel):
     """The final synthesized answer to the user's question."""
@@ -78,6 +112,16 @@ class SynthesisReport(BaseModel):
     coverage: list[CoverageNote] = Field(
         description="One note per sub-question, in order.",
     )
+
+    source_disagreements: list[SourceDisagreement] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Cases where sources cited by different researchers contradict "
+                    "each other. ONLY include genuine factual contradictions, not "
+                    "differences in framing or emphasis. If sources don't disagree, "
+                    "return an empty list.",
+    )
+
     caveats: str = Field(
         default="",
         description="Optional: honest caveats about the research. Mention if some "
@@ -106,6 +150,8 @@ RULES:
 5. FORMAT: 3-6 paragraphs of direct prose. No headings, no bullet lists inside the answer. The answer should read like a concise expert briefing.
 
 6. COVERAGE NOTES: For each sub-question, rate coverage as 'well-supported' (solid mini-report with real citations), 'thin' (some data but limited or single-source), or 'failed' (researcher errored or produced nothing useful).
+
+7. SURFACE DISAGREEMENTS HONESTLY. If two researchers' citations support contradictory claims about the same topic, DO NOT silently pick one and present it as fact. Instead, populate the `source_disagreements` field with the contradiction, and acknowledge it in the answer prose (e.g. "Sources disagree on X — some report Y while others claim Z"). Only flag GENUINE contradictions (different facts), not differences in emphasis or framing. If sources don't actually disagree, return an empty list — don't manufacture conflicts to look thorough.
 
 ORIGINAL USER QUESTION:
 {question}
