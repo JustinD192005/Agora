@@ -110,8 +110,8 @@ class RunDetailResponse(BaseModel):
 
 # ---------- Endpoints ----------
 
-@app.get("/health")
-async def health() -> dict:
+@app.api_route("/health", methods=["GET", "HEAD"])
+async def health():
     return {"status": "ok"}
 
 
