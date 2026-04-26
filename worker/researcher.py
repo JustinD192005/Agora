@@ -169,7 +169,7 @@ That just means you already consumed that content earlier. Don't re-fetch the sa
 # The loop
 # ============================================================
 
-MAX_ITERATIONS = 5
+MAX_ITERATIONS = 8
 
 
 async def run_research_loop(sub_question: str, use_cache: bool = True) -> MiniReport:
