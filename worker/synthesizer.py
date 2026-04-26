@@ -143,15 +143,30 @@ RULES:
 
 2. NO FABRICATED CITATIONS. Only cite URLs and quotes that appear in the researchers' citations. If a sub-question produced no citations (e.g. researcher failed), don't cite anything for that part — acknowledge the gap instead. If NO researchers produced any real citations (all failed), return an EMPTY citations list. Do not invent placeholder URLs like "example.com" or "about:blank".
 
-3. INTEGRATE, DON'T CONCATENATE. Don't just paste the 5 sub-answers back-to-back. Find the connections, contrasts, and themes across sub-questions. The whole should be more coherent than the parts.
+3. INTEGRATE, DON'T CONCATENATE. Find the connections, contrasts, and themes across sub-questions. The answer must feel like a single coherent analysis, not stitched parts.
 
-4. BE HONEST ABOUT GAPS. If researchers failed or produced thin results, say so in the `caveats` field. Don't pretend coverage you don't have.
+4. PRIORITIZE COMPARISON. Do NOT describe techniques or ideas independently. Explicitly compare them:
+* When is one approach better than another?   
+* What specific problem does each approach solve best?
+* How do they differ in trade-offs?
 
-5. FORMAT: 3-6 paragraphs of direct prose. No headings, no bullet lists inside the answer. The answer should read like a concise expert briefing.
+5. EXPLAIN FAILURE MODES. For major approaches, explicitly state where they break down, underperform, or introduce new risks (e.g. latency, data dependency, brittleness, scaling issues).
 
-6. COVERAGE NOTES: For each sub-question, rate coverage as 'well-supported' (solid mini-report with real citations), 'thin' (some data but limited or single-source), or 'failed' (researcher errored or produced nothing useful).
+6. BE DECISIVE WHEN SUPPORTED. If the evidence allows it, make clear statements like:
 
-7. SURFACE DISAGREEMENTS HONESTLY. If two researchers' citations support contradictory claims about the same topic, DO NOT silently pick one and present it as fact. Instead, populate the `source_disagreements` field with the contradiction, and acknowledge it in the answer prose (e.g. "Sources disagree on X — some report Y while others claim Z"). Only flag GENUINE contradictions (different facts), not differences in emphasis or framing. If sources don't actually disagree, return an empty list — don't manufacture conflicts to look thorough.
+* "X is generally preferred when..."
+* "Y is ineffective when..."
+Avoid vague summaries if stronger conclusions are justified.
+
+7. AVOID GENERIC FILLER. Do not include vague statements like "this depends on the use case" unless you immediately specify WHAT it depends on and HOW.
+
+8. BE HONEST ABOUT GAPS. If researchers failed or produced thin results, say so in the `caveats` field. Don't pretend coverage you don't have.
+
+9. FORMAT: 3-6 paragraphs of direct prose. No headings, no bullet lists inside the answer. The answer should read like a concise expert briefing.
+
+10. COVERAGE NOTES: For each sub-question, rate coverage as 'well-supported' (solid mini-report with real citations), 'thin' (some data but limited or single-source), or 'failed' (researcher errored or produced nothing useful).
+
+11. SURFACE DISAGREEMENTS HONESTLY. If two researchers' citations support contradictory claims about the same topic, DO NOT silently pick one. Instead, populate the `source_disagreements` field and reflect it in the answer. Only flag genuine contradictions.
 
 ORIGINAL USER QUESTION:
 {question}
@@ -163,6 +178,7 @@ RESEARCHER MINI-REPORTS:
 {mini_reports}
 
 Produce the final synthesized answer as structured output.
+
 """
 
 

@@ -42,3 +42,10 @@ researcher-output*.txt
 /researcher-*.txt
 /plan-output.txt
 /scripts/test_*.py
+
+
+# Claude Code workspace
+.claude/
+
+# Scratch test outputs
+disagreement-test*.json

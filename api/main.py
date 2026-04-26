@@ -1,22 +1,23 @@
 """FastAPI application — accepts run submissions and enqueues planner jobs."""
 from contextlib import asynccontextmanager
+from datetime import datetime
 from uuid import UUID
+from fastapi.responses import Response
 
 import structlog
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from api.config import get_settings
-from api.db import Event, Run, SessionLocal
+from api.db import Event, Run, SessionLocal, Task
 
 log = structlog.get_logger()
 settings = get_settings()
 
-
-# ---------- Lifespan: create the arq Redis pool once at startup ----------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,17 +31,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Agora", lifespan=lifespan)
 
+# CORS — allow the Next.js dev server to talk to the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ---------- Request/response schemas ----------
 
 class SubmitRunRequest(BaseModel):
     question: str = Field(min_length=5, max_length=500)
-    bust_cache: bool = Field(
-        default=False,
-        description="If true, disable the deterministic-replay cache for this "
-                    "specific run. Forces fresh LLM calls and web fetches. "
-                    "Useful when testing prompt or tool changes.",
-    )
+    bust_cache: bool = Field(default=False)
 
 
 class RunResponse(BaseModel):
@@ -57,6 +62,28 @@ class RunResponse(BaseModel):
             status=run.status,
             final_answer=run.final_answer,
         )
+
+
+class TaskResponse(BaseModel):
+    id: UUID
+    kind: str
+    status: str
+    input: dict
+    output: dict | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error: str | None
+
+
+class RunDetailResponse(BaseModel):
+    id: UUID
+    question: str
+    status: str
+    final_answer: str | None
+    expected_researchers: int | None
+    created_at: datetime
+    completed_at: datetime | None
+    tasks: list[TaskResponse]
 
 
 # ---------- Endpoints ----------
@@ -77,7 +104,6 @@ async def submit_run(payload: SubmitRunRequest) -> RunResponse:
         session.add(run)
         await session.flush()
 
-        # Log a run_created event
         session.add(Event(
             run_id=run.id,
             kind="run_created",
@@ -86,16 +112,21 @@ async def submit_run(payload: SubmitRunRequest) -> RunResponse:
         await session.commit()
         await session.refresh(run)
 
-    # Enqueue planner job — the planner reads bust_cache from the run row
     await app.state.arq.enqueue_job("run_planner", str(run.id))
 
-    log.info(
-        "run.submitted",
-        run_id=str(run.id),
-        question=payload.question,
-        bust_cache=payload.bust_cache,
-    )
+    log.info("run.submitted", run_id=str(run.id), question=payload.question)
     return RunResponse.from_orm(run)
+
+
+@app.get("/runs", response_model=list[RunResponse])
+async def list_runs() -> list[RunResponse]:
+    """Return the 20 most recent runs for the history page."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Run).order_by(Run.created_at.desc()).limit(20)
+        )
+        runs = result.scalars().all()
+        return [RunResponse.from_orm(r) for r in runs]
 
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
@@ -106,3 +137,88 @@ async def get_run(run_id: UUID) -> RunResponse:
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
         return RunResponse.from_orm(run)
+
+
+@app.get("/runs/{run_id}/details", response_model=RunDetailResponse)
+async def get_run_details(run_id: UUID) -> RunDetailResponse:
+    """Return full run details including all task statuses.
+
+    Used by the dashboard to show the pipeline state in real time.
+    The frontend polls this every 2-3 seconds while a run is in progress.
+    """
+    async with SessionLocal() as session:
+        run_result = await session.execute(select(Run).where(Run.id == run_id))
+        run = run_result.scalar_one_or_none()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        tasks_result = await session.execute(
+            select(Task)
+            .where(Task.run_id == run_id)
+            .order_by(Task.started_at)
+        )
+        tasks = tasks_result.scalars().all()
+
+    return RunDetailResponse(
+        id=run.id,
+        question=run.user_question,
+        status=run.status,
+        final_answer=run.final_answer,
+        expected_researchers=run.expected_researchers,
+        created_at=run.created_at,
+        completed_at=run.completed_at,
+        tasks=[
+            TaskResponse(
+                id=t.id,
+                kind=t.kind,
+                status=t.status,
+                input=t.input or {},
+                output=t.output,
+                started_at=t.started_at,
+                completed_at=t.completed_at,
+                error=t.error,
+            )
+            for t in tasks
+        ],
+    )
+
+@app.get("/runs/{run_id}/report.pdf")
+async def download_report(run_id: UUID):
+    """Generate and return a PDF research report for the given run."""
+    async with SessionLocal() as session:
+        run_result = await session.execute(select(Run).where(Run.id == run_id))
+        run = run_result.scalar_one_or_none()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        tasks_result = await session.execute(
+            select(Task).where(Task.run_id == run_id).order_by(Task.started_at)
+        )
+        tasks = tasks_result.scalars().all()
+
+    from api.pdf import generate_pdf
+
+    run_data = {
+        "id": str(run.id),
+        "question": run.user_question,
+        "status": run.status,
+        "final_answer": run.final_answer,
+        "tasks": [
+            {
+                "kind": t.kind,
+                "status": t.status,
+                "input": t.input or {},
+                "output": t.output,
+            }
+            for t in tasks
+        ],
+    }
+
+    pdf_bytes = generate_pdf(run_data)
+    filename = f"agora-report-{str(run_id)[:8]}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
