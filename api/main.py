@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from uuid import UUID
 from fastapi.responses import Response
-
+import asyncio 
 import structlog
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -24,17 +24,39 @@ async def lifespan(app: FastAPI):
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     app.state.arq = await create_pool(redis_settings)
     log.info("api.startup", redis=settings.redis_url)
+
+    # Optionally spawn arq worker inside this process (set START_WORKER=1)
+    worker_task = None
+    if os.getenv("START_WORKER") == "1":
+        from arq.worker import create_worker
+        from worker.main import WorkerSettings
+        log.info("worker.starting_in_process")
+        worker = create_worker(WorkerSettings)
+        worker_task = asyncio.create_task(worker.async_run())
+        app.state.worker = worker
+        app.state.worker_task = worker_task
+
     yield
+
+    if worker_task is not None:
+        log.info("worker.stopping")
+        await app.state.worker.close()
+        worker_task.cancel()
+
     await app.state.arq.aclose()
     log.info("api.shutdown")
 
 
 app = FastAPI(title="Agora", lifespan=lifespan)
 
-# CORS — allow the Next.js dev server to talk to the API
+import os
+
+# Comma-separated list from env var, e.g. "http://localhost:3000,https://agora-app.vercel.app"
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
