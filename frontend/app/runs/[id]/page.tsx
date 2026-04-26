@@ -241,7 +241,7 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
             {run.final_answer}
           </div>
 
-          {synthesizer?.output?.citations && (
+          {Array.isArray(synthesizer?.output?.citations) && (synthesizer.output.citations as unknown[]).length > 0 && (
             <div>
               <div className="mono" style={{ fontSize: 10, color: "var(--text-3)", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 12 }}>
                 Citations
