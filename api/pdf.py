@@ -159,13 +159,12 @@ def generate_pdf(run_data: dict) -> bytes:
 
             status_color = GREEN if "completed" in status else RED
             header_data = [[
-                Paragraph(f"#{i}", S["subq_label"]),
-                Paragraph(sub_q, S["subq_text"]),
+                Paragraph(f"{i}. {sub_q}", S["subq_text"]),
                 Paragraph(status.replace("_", " ").upper(), ParagraphStyle(
-                    "st", fontName="Helvetica-Bold", fontSize=8, textColor=status_color,
+                    "st", fontName="Helvetica-Bold", fontSize=8, textColor=status_color, alignment=2,
                 )),
             ]]
-            header_table = Table(header_data, colWidths=[10*mm, None, 28*mm])
+            header_table = Table(header_data, colWidths=[None, 28*mm])
             header_table.setStyle(TableStyle([
                 ("VALIGN",        (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING",   (0, 0), (-1, -1), 0),
