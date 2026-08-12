@@ -84,5 +84,12 @@ class LLMCache(Base):
 
 # Engine + session factory
 _settings = get_settings()
-engine = create_async_engine(_settings.database_url, echo=False, pool_size=5, max_overflow=10)
+engine = create_async_engine(
+    _settings.database_url,
+    echo=False,
+    pool_size=5,
+    max_overflow=10,
+    pool_recycle=300,
+    pool_pre_ping=True,
+)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
