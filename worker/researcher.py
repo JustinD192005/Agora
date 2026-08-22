@@ -7,16 +7,18 @@ Flow per iteration:
   4. If the tool was `finish`, return the mini-report
   5. Otherwise loop
 
-Hard cap: MAX_ITERATIONS. After that, we force-finish with whatever the agent has.
+Hard cap: MAX_ITERATIONS. In the final turns we inject explicit pressure toward
+`finish` so the agent commits to an answer instead of researching forever.
 
 Design notes:
-- We use instructor's TOOLS mode — the LLM sees the tool input schemas as
-  OpenAI-style function specs and chooses one per turn.
+- We use instructor's JSON mode — the LLM returns a JSON object matching the
+  AgentChoice schema directly, rather than OpenAI-style function calls. Newer
+  Groq models (gpt-oss) misread TOOLS mode and try to invoke the tool names
+  from the prompt as real functions.
 - The schema uses FLAT SCALAR fields for simple tool inputs (query, url,
-  expression) rather than nested objects. Groq's newer models (gpt-oss) return
-  nested single-field objects as bare strings, which breaks validation. Flat
-  scalars sidestep the ambiguity entirely; we reconstruct the typed input
-  objects in code before dispatch.
+  expression) rather than nested objects. gpt-oss returns nested single-field
+  objects as bare strings, which breaks validation. Flat scalars sidestep the
+  ambiguity entirely; we reconstruct the typed input objects before dispatch.
 - Every LLM call and tool call is logged and returned as structured trace events.
 - All tool errors become observations the agent can reason about — we never
   crash the loop on a flaky URL or a malformed query.
@@ -50,7 +52,7 @@ ToolName = Literal["web_search", "web_fetch", "calculator", "finish"]
 
 
 class AgentChoice(BaseModel):
-    """Flat tool-choice schema compatible with Groq's tool validator.
+    """Flat tool-choice schema compatible with Groq's JSON mode.
 
     The LLM picks ONE tool via `tool`, then fills in ONLY the matching
     input field. Simple tools use flat scalar strings; finish uses a
@@ -132,21 +134,26 @@ AVAILABLE TOOLS (pick exactly one per turn):
 - calculator: evaluate arithmetic — set `expression` to a plain string
 - finish: terminal — set `finish_input` with summary, citations, confidence_notes
 
-STRATEGY:
-1. Start with web_search to find candidate sources.
-2. Pick 1-3 promising URLs and web_fetch them to read actual content.
-3. Synthesize an answer grounded in what you actually read.
-4. Call finish with a concise summary and citations pointing to URLs you fetched.
+TARGET PATTERN (follow this unless something fails):
+  Turn 1: web_search
+  Turn 2: web_fetch the best result
+  Turn 3: web_fetch one more source
+  Turn 4: finish
+That is FOUR turns. Anything beyond is a fallback for failures, not the plan.
 
 RULES:
+- BIAS HEAVILY TOWARD FINISHING. Two good sources is enough. A concise answer with
+  2 real citations beats a perfect answer you never deliver.
+- If you have fetched at least ONE page successfully, you have enough to call finish.
+- Do NOT search again after a successful fetch unless that content was completely
+  irrelevant to the sub-question.
+- Never fetch the same URL twice. Never repeat a search query you already ran.
 - NEVER cite a URL you haven't fetched. Every citation must be a URL that appeared
   in a successful web_fetch result.
 - Every citation quote must be a SHORT VERBATIM excerpt from fetched content.
   Don't paraphrase inside quote marks.
-- If a search returns no useful results, try a different query before giving up.
-- If a fetch fails, try a different URL. Don't get stuck on one source.
+- If a fetch fails, try ONE different URL, then finish with what you have.
 - Keep summaries to 2-5 sentences. Long summaries dilute useful information.
-- You have at most 8 tool calls. Budget them. Don't search 5 times before fetching anything.
 - Each turn, use the "thought" field to briefly justify your choice.
 
 OUTPUT FORMAT (CRITICAL):
@@ -184,10 +191,39 @@ async def run_research_loop(sub_question: str, use_cache: bool = True) -> MiniRe
 
     trace: list[dict] = []
     iterations = 0
+    successful_fetches = 0
 
     while iterations < MAX_ITERATIONS:
         iterations += 1
         log.info("researcher.iteration", sub_question=sub_question[:80], iteration=iterations)
+
+        # --- Escalating pressure toward finish as the cap approaches ---
+        remaining = MAX_ITERATIONS - iterations
+        if remaining <= 1:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "STOP RESEARCHING. This is your LAST turn. You MUST set tool='finish' "
+                    "now and populate finish_input using what you already know. Cite the URLs "
+                    "you already fetched. Do not search or fetch again."
+                ),
+            })
+        elif remaining == 2:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Only {remaining} turns left. Fetch at most one more source, then "
+                    "call finish. Do not start a new search."
+                ),
+            })
+        elif successful_fetches >= 2:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"You have already fetched {successful_fetches} sources successfully. "
+                    "That is enough. Call finish now unless a fetch was unusable."
+                ),
+            })
 
         # --- LLM step: ask the researcher LLM what to do next ---
         try:
@@ -231,6 +267,9 @@ async def run_research_loop(sub_question: str, use_cache: bool = True) -> MiniRe
 
         # --- Tool dispatch ---
         observation_text = await _dispatch_tool(choice, trace, use_cache=use_cache)
+
+        if choice.tool == "web_fetch" and not observation_text.startswith("Fetch failed"):
+            successful_fetches += 1
 
         # Add both assistant intent and tool observation to conversation history
         input_for_history = _input_repr(choice)
@@ -349,12 +388,37 @@ def _compact_old_observations(messages: list[dict]) -> None:
 def _emergency_report(
     sub_question: str, iterations: int, trace: list[dict], reason: str,
 ) -> MiniReport:
-    """Fallback when the loop exits without a proper finish call."""
+    """Fallback when the loop exits without a proper finish call.
+
+    Salvages whatever the agent actually read: we pull the URLs it fetched
+    successfully out of the trace so the synthesizer at least knows which
+    sources were consulted, even though the agent never committed to a summary.
+    """
+    fetched_urls = [
+        ev["payload"]["input"].get("url")
+        for ev in trace
+        if ev.get("kind") == "tool_call"
+        and ev["payload"].get("tool") == "web_fetch"
+        and "status=ok" in ev["payload"].get("result_summary", "")
+    ]
+    fetched_urls = [u for u in fetched_urls if u]
+
+    if fetched_urls:
+        summary = (
+            f"The researcher consulted {len(fetched_urls)} source(s) but did not commit "
+            f"to a confident answer within {iterations} iterations. Sources reviewed: "
+            + ", ".join(fetched_urls[:3])
+        )
+    else:
+        summary = (
+            f"The researcher did not reach a confident answer within {iterations} iterations."
+        )
+
     return MiniReport(
         sub_question=sub_question,
-        summary=f"The researcher did not reach a confident answer within {iterations} iterations.",
+        summary=summary,
         citations=[],
-        confidence_notes=f"Agent terminated due to: {reason}",
+        confidence_notes=f"LOW CONFIDENCE — agent terminated due to: {reason}",
         iterations=iterations,
         terminated_reason=reason,
         trace=trace,
