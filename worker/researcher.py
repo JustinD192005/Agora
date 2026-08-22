@@ -12,10 +12,11 @@ Hard cap: MAX_ITERATIONS. After that, we force-finish with whatever the agent ha
 Design notes:
 - We use instructor's TOOLS mode — the LLM sees the tool input schemas as
   OpenAI-style function specs and chooses one per turn.
-- The schema uses a FLAT shape (tool + per-tool-input fields) rather than a
-  nested discriminated union, because Groq's tool validator requires flat
-  parameter shapes. The LLM picks one tool via the `tool` literal, then
-  populates the corresponding `*_input` field.
+- The schema uses FLAT SCALAR fields for simple tool inputs (query, url,
+  expression) rather than nested objects. Groq's newer models (gpt-oss) return
+  nested single-field objects as bare strings, which breaks validation. Flat
+  scalars sidestep the ambiguity entirely; we reconstruct the typed input
+  objects in code before dispatch.
 - Every LLM call and tool call is logged and returned as structured trace events.
 - All tool errors become observations the agent can reason about — we never
   crash the loop on a flaky URL or a malformed query.
@@ -52,11 +53,8 @@ class AgentChoice(BaseModel):
     """Flat tool-choice schema compatible with Groq's tool validator.
 
     The LLM picks ONE tool via `tool`, then fills in ONLY the matching
-    `*_input` field. The other input fields should be left as null.
-
-    We validate after-the-fact that the correct input field is populated,
-    rather than using a discriminated union (which Groq's validator rejects
-    as nested-object).
+    input field. Simple tools use flat scalar strings; finish uses a
+    structured object because it genuinely needs nested citations.
     """
     thought: str = Field(
         description="One sentence: why you're choosing this tool right now. "
@@ -66,18 +64,21 @@ class AgentChoice(BaseModel):
     tool: ToolName = Field(
         description="Which tool to call. Exactly one of: web_search, web_fetch, calculator, finish."
     )
-    # Populate ONLY the one matching the `tool` field above. Leave the others null.
-    search_input: WebSearchInput | None = Field(
+    # Flat scalar inputs — populate ONLY the one matching `tool` above.
+    query: str | None = Field(
         default=None,
-        description="REQUIRED if tool='web_search', otherwise null.",
+        description="REQUIRED if tool='web_search'. A focused search query, "
+                    "3-8 words. Plain string, not an object.",
     )
-    fetch_input: WebFetchInput | None = Field(
+    url: str | None = Field(
         default=None,
-        description="REQUIRED if tool='web_fetch', otherwise null.",
+        description="REQUIRED if tool='web_fetch'. A full https:// URL. "
+                    "Plain string, not an object.",
     )
-    calculator_input: CalculatorInput | None = Field(
+    expression: str | None = Field(
         default=None,
-        description="REQUIRED if tool='calculator', otherwise null.",
+        description="REQUIRED if tool='calculator'. An arithmetic expression. "
+                    "Plain string, not an object.",
     )
     finish_input: FinishInput | None = Field(
         default=None,
@@ -88,9 +89,9 @@ class AgentChoice(BaseModel):
     def check_input_matches_tool(self) -> "AgentChoice":
         """Ensure the correct input field is populated for the chosen tool."""
         mapping = {
-            "web_search": self.search_input,
-            "web_fetch": self.fetch_input,
-            "calculator": self.calculator_input,
+            "web_search": self.query,
+            "web_fetch": self.url,
+            "calculator": self.expression,
             "finish": self.finish_input,
         }
         expected = mapping[self.tool]
@@ -126,10 +127,10 @@ RESEARCHER_SYSTEM = """You are a Researcher agent in Agora, a multi-agent resear
 Your job: answer ONE focused sub-question using the tools available to you.
 
 AVAILABLE TOOLS (pick exactly one per turn):
-- web_search(query): find relevant URLs and snippets
-- web_fetch(url): get the main text of a specific page
-- calculator(expression): evaluate arithmetic
-- finish(summary, citations, confidence_notes): terminal — call when ready to answer
+- web_search: find relevant URLs and snippets — set `query` to a plain string
+- web_fetch: get the main text of a specific page — set `url` to a plain string
+- calculator: evaluate arithmetic — set `expression` to a plain string
+- finish: terminal — set `finish_input` with summary, citations, confidence_notes
 
 STRATEGY:
 1. Start with web_search to find candidate sources.
@@ -145,7 +146,7 @@ RULES:
 - If a search returns no useful results, try a different query before giving up.
 - If a fetch fails, try a different URL. Don't get stuck on one source.
 - Keep summaries to 2-5 sentences. Long summaries dilute useful information.
-- You have at most 5 tool calls. Budget them. Don't search 5 times before fetching anything.
+- You have at most 8 tool calls. Budget them. Don't search 5 times before fetching anything.
 - Each turn, use the "thought" field to briefly justify your choice.
 
 OUTPUT FORMAT (CRITICAL):
@@ -153,10 +154,10 @@ Each turn, you output:
   - thought: one sentence of reasoning
   - tool: one of "web_search", "web_fetch", "calculator", "finish"
   - the matching input field populated for the chosen tool:
-      * if tool=web_search → populate search_input
-      * if tool=web_fetch  → populate fetch_input
-      * if tool=calculator → populate calculator_input
-      * if tool=finish     → populate finish_input
+      * if tool=web_search → set `query` to a PLAIN STRING (e.g. "raft consensus algorithm")
+      * if tool=web_fetch  → set `url` to a PLAIN STRING (e.g. "https://raft.github.io/raft.pdf")
+      * if tool=calculator → set `expression` to a PLAIN STRING (e.g. "42 * 1.5")
+      * if tool=finish     → set `finish_input` to an object with summary, citations, confidence_notes
   - leave the other input fields as null.
 
 NOTE on history: older observations in this conversation may appear as compact
@@ -232,11 +233,10 @@ async def run_research_loop(sub_question: str, use_cache: bool = True) -> MiniRe
         observation_text = await _dispatch_tool(choice, trace, use_cache=use_cache)
 
         # Add both assistant intent and tool observation to conversation history
-        # Serialize just the populated input, not the whole AgentChoice object
-        input_for_history = _input_for_tool(choice)
+        input_for_history = _input_repr(choice)
         messages.append({
             "role": "assistant",
-            "content": f"Thought: {choice.thought}\nTool: {choice.tool}\nInput: {input_for_history.model_dump_json()}",
+            "content": f"Thought: {choice.thought}\nTool: {choice.tool}\nInput: {input_for_history}",
         })
         messages.append({
             "role": "user",
@@ -252,23 +252,23 @@ async def run_research_loop(sub_question: str, use_cache: bool = True) -> MiniRe
     return _emergency_report(sub_question, iterations, trace, reason="iteration_cap")
 
 
-def _input_for_tool(choice: AgentChoice) -> BaseModel:
-    """Pull out the populated input field for the chosen tool."""
+def _input_repr(choice: AgentChoice) -> str:
+    """Short string form of the populated input, for conversation history."""
     if choice.tool == "web_search":
-        return choice.search_input
+        return choice.query or ""
     if choice.tool == "web_fetch":
-        return choice.fetch_input
+        return choice.url or ""
     if choice.tool == "calculator":
-        return choice.calculator_input
+        return choice.expression or ""
     if choice.tool == "finish":
-        return choice.finish_input
-    raise ValueError(f"Unknown tool: {choice.tool}")
+        return choice.finish_input.model_dump_json() if choice.finish_input else ""
+    return ""
 
 
 async def _dispatch_tool(choice: AgentChoice, trace: list[dict], use_cache: bool = True) -> str:
     """Run the chosen tool and return a text observation for the LLM."""
     if choice.tool == "web_search":
-        inp = choice.search_input
+        inp = WebSearchInput(query=choice.query)
         result = await web_search(inp, use_cache=use_cache)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "web_search",
@@ -285,7 +285,7 @@ async def _dispatch_tool(choice: AgentChoice, trace: list[dict], use_cache: bool
         return "\n".join(lines)
 
     if choice.tool == "web_fetch":
-        inp = choice.fetch_input
+        inp = WebFetchInput(url=choice.url)
         result = await web_fetch(inp, use_cache=use_cache)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "web_fetch",
@@ -298,7 +298,7 @@ async def _dispatch_tool(choice: AgentChoice, trace: list[dict], use_cache: bool
         return f"Fetched {result.url}{marker} ({result.content_length} chars):\n\n{result.content}"
 
     if choice.tool == "calculator":
-        inp = choice.calculator_input
+        inp = CalculatorInput(expression=choice.expression)
         result = await calculator(inp)
         trace.append({"kind": "tool_call", "payload": {
             "tool": "calculator",
