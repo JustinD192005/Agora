@@ -271,7 +271,7 @@ async def _call_groq_with_retry(
 # ---------- Model name constants ----------
 
 GEMINI_FLASH = "gemini-2.5-flash"
-GROQ_LLAMA = "llama-3.3-70b-versatile"
+GROQ_LLAMA = "openai/gpt-oss-120b"
 
 
 # ---------- Backward-compat alias ----------
