@@ -49,7 +49,7 @@ _groq_raw = OpenAI(
     api_key=_settings.groq_api_key,
     base_url="https://api.groq.com/openai/v1",
 )
-groq = instructor.from_openai(_groq_raw, mode=instructor.Mode.TOOLS)
+groq = instructor.from_openai(_groq_raw, mode=instructor.Mode.JSON)
 
 
 # ---------- Rate-limit-aware retry predicate ----------
