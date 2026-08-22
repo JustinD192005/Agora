@@ -183,7 +183,7 @@ async def call_structured_groq(
     response_model: type[T],
     kind: str = "researcher",
     temperature: float = 0.2,
-    max_tokens: int = 800,
+    max_tokens: int = 1000,
     use_cache: bool = True,
 ) -> T:
     """Call Groq with a Pydantic response_model. Used by the researcher loop.
